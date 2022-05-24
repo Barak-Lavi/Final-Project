@@ -16,6 +16,7 @@ class SurgeryVariable_SurgeryRequest(SurgeryVariable):
         self.with_surgery_team = {'Nurse': False, 'Anesthetist': False, 'Equipment': False}
         self.surgery_team_in_update = {'Nurse': False, 'Anesthetist': False, 'Equipment': False}
         self.value_in_update = None
+        self.surgery_request = None
         super(SurgeryVariable_SurgeryRequest, self).__init__(room, day, order, start_time, end_time, constraints,
                                                              sr_domain, surgery_request)
 

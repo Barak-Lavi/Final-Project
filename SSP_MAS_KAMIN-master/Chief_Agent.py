@@ -13,7 +13,7 @@ from datetime import timedelta
 
 # random.seed(4)
 random.SystemRandom()
-cost_factor = 1_000
+# cost_factor = 1_000
 
 
 def reduct_sr_domain(sr_domain):
@@ -361,7 +361,7 @@ class Ward_Agent(Participating_Agent):
                 sr_v = t[0]
                 s_v = t[1]
                 init_day_cost += Prices.set_dro_prices(sr_v, s_v, self.ward, num_surgeries[room_num], True, None,
-                                                       self.with_surgery_Team, self.set_dro_prices,
+                                                       self.with_surgery_Team, self.no_good_sr,
                                                        stable_schedule_flag=stable_schedule_flag,
                                                        current_NCLO=self.counter)
                 if sr_v.value is not None:

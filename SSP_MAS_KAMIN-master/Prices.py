@@ -4,8 +4,8 @@ from datetime import time
 
 from R_in_Surgery import SurgeryVariable_SurgeryRequest
 
-inf_price = 1_000_000  # for hard constraints
-cost_factor = 1_000
+inf_price = 1_000_000_000  # for hard constraints
+cost_factor = 1000
 
 # stability factor:
 
@@ -66,15 +66,17 @@ def set_dro_prices(sr_v, s_v, ward, num_surgeries_day, mutual, ty, with_surgery_
     """
     dro_cost = 0
     if mutual or isinstance(sr_v, ty):  # if the init_sol cost is calculated or sr_v was updated
-        dro_cost += _set_surgery_order_price(sr_v, ward, num_surgeries_day)
-        dro_cost += _set_surgery_date_price(sr_v, ward)
-        dro_cost += _set_surgeon_patient_price(sr_v, s_v, ward)
+        dro_cost += _set_surgery_order_price(sr_v, ward, num_surgeries_day) #BARAK V
+        dro_cost += _set_surgery_date_price(sr_v, ward)#BARAK V
+        dro_cost += _set_surgeon_patient_price(sr_v, s_v, ward)#BARAK V
         dro_cost += _set_all_diff_price(sr_v)
         # dro_cost += _set_schedule_gap_price(sr_v, ward)
+        # dro_cost = dro_cost /6
         if stable_schedule_flag:
             dro_cost += _set_stable_schedule_price(sr_v, with_surgery_Team, no_good_sr, current_NCLO)
     else:  # only s_v was updated
         dro_cost += _set_surgeon_patient_price(sr_v, s_v, ward)
+
     return dro_cost
 
 
@@ -228,27 +230,42 @@ def _set_surgery_order_price(sr_v, ward, current_num_surgeries):
 
     """
     cost = 0
+    order_cost = 0
     if sr_v.value is not None:
         max_c = ward.max_attributes["cancellations"]  # max cancellation in ward current RTG
+        min_c = ward.min_attributes["cancellations"]  # min cancellation in ward current RTG
         param_c_w = ward.parameter_w["surgery_order"]["num_cancellations"]  # cancellation parameter weight in cost
         max_i = ward.max_attributes["complexity"]  # max importance/complexity in ward current RTG
+        min_i = ward.min_attributes["complexity"]  # min importance/complexity in ward current RTG
         param_i_w = ward.parameter_w["surgery_order"][
             "complexity"]  # importance/complexity parameter weight in cost
-        max_l = ward.max_attributes["duration"]  # max surgery duration in ward current RTG
-        param_l_w = ward.parameter_w["surgery_order"]["duration"]  # duration parameter weight in cost
+        max_u = ward.max_attributes["urgency"]  # max urgency in ward current RTG
+        min_u = ward.min_attributes["urgency"]  # min urgency in ward current RTG
+        param_u_w = ward.parameter_w["surgery_order"]["urgency"]  # cancellation parameter weight in cost
         max_age_cut = max(ward.max_attributes["min_birth_d"].age_cut(sr_v.day),
                           ward.max_attributes["max_birth_d"].age_cut(sr_v.day))  # max age_cut in ward current RTG
+        min_age_cut = min(ward.max_attributes["min_birth_d"].age_cut(sr_v.day),
+                          ward.max_attributes["max_birth_d"].age_cut(sr_v.day))  # min age_cut in ward current RTG
         param_a_w = ward.parameter_w["surgery_order"]["age"]  # age cut parameter weight in cost
         cons_w = ward.constraints_w["surgery_order"]  # overall constraint weight
         age_cut = sr_v.value.age_cut(sr_v.day)
+        param_w_sum = param_a_w + param_u_w + param_i_w + param_c_w
 
-        cost = cons_w * (param_c_w * ((max_c - sr_v.value.num_cancellations) / (max_c + sys.float_info.epsilon)) +
-                         param_i_w * ((int(max_i) - int(sr_v.value.complexity)) / int(max_i)) +
-                         param_l_w * ((max_l - sr_v.value.duration) / max_l) +
-                         param_a_w * ((max_age_cut - age_cut) / max_age_cut)) * \
-               ((current_num_surgeries + sys.float_info.epsilon - sr_v.order) / current_num_surgeries)
-    sr_v.constraints['dro']["surgery_order"].prices[sr_v.get_constraint_dro_key()] = cost * cost_factor
-    return cost * cost_factor
+        # param_l_w * ((max_l - sr_v.value.duration) / max_l - min_l) + @took down BARAK
+        # cost= cons_w * (((((max_c - sr_v.value.num_cancellations) / (max_c - min_c + sys.float_info.epsilon))**param_c_w) *
+        #     (((int(max_i) - int(sr_v.value.complexity)) / (int(max_i) - int(min_i) + sys.float_info.epsilon))**param_i_w) *
+        #     (((max_u - sr_v.value.urgency) / (max_u - min_u + sys.float_info.epsilon))**param_u_w) *
+        #     (((max_age_cut - age_cut) / (max_age_cut - min_age_cut + sys.float_info.epsilon))**param_a_w))**(1/param_w_sum))
+        #### withot age cat
+        cost = cons_w * (((((max_c - sr_v.value.num_cancellations) / (
+                    max_c - min_c + sys.float_info.epsilon)) ** param_c_w) *
+                          (((int(max_i) - int(sr_v.value.complexity)) / (
+                                      int(max_i) - int(min_i) + sys.float_info.epsilon)) ** param_i_w) *
+                          (((max_u - sr_v.value.urgency) / (max_u - min_u + sys.float_info.epsilon)) ** param_u_w)) ** (
+                                     1 / param_w_sum))
+        order_cost = cost*((current_num_surgeries + sys.float_info.epsilon - sr_v.order) / current_num_surgeries)
+    sr_v.constraints['dro']["surgery_order"].prices[sr_v.get_constraint_dro_key()] = order_cost*cost_factor
+    return order_cost*cost_factor
 
 
 def _set_surgery_date_price(sr_v, ward):
@@ -262,24 +279,29 @@ def _set_surgery_date_price(sr_v, ward):
     if sr_v.value is not None:
         cons_w = ward.constraints_w["surgery_date"]  # overall constraint weight
         max_c = ward.max_attributes["cancellations"]  # max cancellation in ward current RTG
+        min_c = ward.min_attributes["cancellations"]  # min cancellation in ward current RTG
         param_c_w = ward.parameter_w["surgery_date"]["num_cancellations"]  # cancellation parameter weight in cost
         max_u = ward.max_attributes["urgency"]  # max urgency in ward current RTG
+        min_u = ward.min_attributes["urgency"]  # min urgency in ward current RTG
         param_u_w = ward.parameter_w["surgery_date"]["urgency"]  # cancellation parameter weight in cost
-        max_rdc = ward.max_attributes[
-            "entrance_d_cut"]  # earliest entrance date in current RTG, rdc - referral date cut
+        max_rdc = ward.max_attributes["entrance_d_cut"]  # earliest entrance date in current RTG, rdc - referral date cut
+        min_rdc = ward.min_attributes["entrance_d_cut"]  # latest entrance date in current RTG, rdc - referral date cut
         param_rdc_w = ward.parameter_w["surgery_date"][
             "entrance_date"]  # referral date cut parameter weight in cost
+        param_w_sum = param_rdc_w + param_u_w + param_c_w
         max_wait = ward.max_attributes["entrance_d"].calc_waiting_days(sr_v.day)  # max waiting time in days in
+        min_wait = ward.min_attributes["entrance_d"].calc_waiting_days(sr_v.day)  # min waiting time in days in
         # current RTG
         my_wait = sr_v.value.calc_waiting_days(sr_v.day)  # current surgery request in variable waiting time
         # referring to the date of the variable
 
-        cost = cons_w * (param_c_w * ((max_c - sr_v.value.num_cancellations) / max_c) +
-                         param_u_w * ((int(max_u) - int(sr_v.value.urgency)) / int(max_u)) +
-                         param_rdc_w * ((max_rdc - sr_v.value.entrance_date_cut) / max_rdc)) * \
+        cost = cons_w * (((((max_c - sr_v.value.num_cancellations) / (max_c - min_c +sys.float_info.epsilon))**param_c_w) *
+               (((max_u - sr_v.value.urgency) /(max_u - min_u +sys.float_info.epsilon))**param_u_w)*
+               (((max_rdc - sr_v.value.entrance_date_cut) / (max_rdc- min_rdc +sys.float_info.epsilon))**param_rdc_w))**(1/param_w_sum)) * \
                ((max_wait + sys.float_info.epsilon - my_wait) / max_wait)
-    sr_v.constraints['dro']['surgery_date'].prices[sr_v.get_constraint_dro_key()] = cost * cost_factor
-    return cost * cost_factor
+
+    sr_v.constraints['dro']['surgery_date'].prices[sr_v.get_constraint_dro_key()] = cost*cost_factor
+    return cost*cost_factor
 
 
 def _set_surgeon_patient_price(sr_v, s_v, ward):
@@ -299,16 +321,17 @@ def _set_surgeon_patient_price(sr_v, s_v, ward):
         else:
             cons_w = ward.constraints_w["surgeon_patient"]
             max_i = ward.max_attributes["complexity"]
+            min_i = ward.min_attributes["complexity"]
             param_i_w = ward.parameter_w["surgeon_patient"]["complexity"]
             max_grade_skill = ward.max_attributes["skill"][sr_v.value.surgery_type.st_id]
+            min_grade_skill = ward.min_attributes["skill"][sr_v.value.surgery_type.st_id]
             param_s_w = ward.parameter_w['surgeon_patient']['skill']
-
-            cost = cons_w * (param_i_w * (int(sr_v.value.complexity) / int(max_i)) +
-                             param_s_w * ((max_grade_skill - s_v.value.surgical_grades[sr_v.value.surgery_type]) /
-                                          max_grade_skill))
-
-    sr_v.constraints['dro']['surgeon_patient'].prices[sr_v.get_constraint_dro_key()] = cost * cost_factor
-    return cost * cost_factor
+            param_w_sum = param_i_w + param_s_w
+            cost = cons_w * (((((int(max_i) - int(sr_v.value.complexity)) / (int(max_i) - int(min_i) + sys.float_info.epsilon))**param_i_w)*
+                             (((max_grade_skill - s_v.value.surgical_grades[sr_v.value.surgery_type]) /
+                                          (max_grade_skill - min_grade_skill + sys.float_info.epsilon))**param_s_w))**(1/param_w_sum))
+    sr_v.constraints['dro']['surgeon_patient'].prices[sr_v.get_constraint_dro_key()] = cost*cost_factor
+    return cost*cost_factor
 
 
 def _set_all_diff_price(sr_v):
@@ -349,6 +372,7 @@ def _set_homo_hetero_price(sr_v_list, ward, by_units):
 
     elif num_surgeries > 0:
         cost = cons_w * (num_unique_surgeries / num_surgeries)
+
     else:
         print('lets see')
     sr_v_list[0].constraints['dr']['homo_hetero'].prices[sr_v_list[0].get_constraint_dr_key()] = cost * cost_factor

@@ -6,8 +6,9 @@ from Unit import Unit
 import pandas as pd
 import requests
 import datetime
+import random
 
-path = r'C:\Users\User\Desktop\final project\ex2'
+path = r'C:\Users\User\Desktop\Final-Project\Final-Project\ex3'
 
 
 def _init_surgery_types(get_st_db):
@@ -89,15 +90,83 @@ class Ward(object):
         self._init_entrance_date_cut()
         self.schedule_gaps = {0: 0, 7: 0.25, 30: 0.75}  # init_schedule_gaps - key - gap value - cost factor
         # weights between the constraints sum = 1
-        self.constraints_w = {"surgery_order": 1 / 6, "surgery_date": 1 / 6, "surgeon_patient": 1 / 6,
-                              "homo_hetero": 1 / 6,
-                              "efficiency": 1 / 6, "schedule_gap": 1 / 6}
-        # weights between the parameters of every constraint for each constraint sum =1
+        # self.constraints_w = {"surgery_order": 1 / 6, "surgery_date": 1 / 6, "surgeon_patient": 1 / 6,
+        #                       "homo_hetero": 1 / 6,
+        #                       "efficiency": 1 / 6, "schedule_gap": 1 / 6}
+        # # weights between the parameters of every constraint for each constraint sum =1
+        # self.parameter_w = {
+        #     "surgery_order": {"num_cancellations": 0.25, "complexity": 0.25, "duration": 0.25, "age": 0.25},
+        #     "surgery_date": {"num_cancellations": 1 / 3, "urgency": 1 / 3, "entrance_date": 1 / 3},
+        #     "surgeon_patient": {"complexity": 0.5, "skill": 0.5}}
+        self.constraints_w = {"surgery_order": 0.1, "surgery_date": 0.6, "surgeon_patient": 0.1,
+                              "homo_hetero": 0.1,
+                              "efficiency": 0.1}
         self.parameter_w = {
-            "surgery_order": {"num_cancellations": 0.25, "complexity": 0.25, "duration": 0.25, "age": 0.25},
-            "surgery_date": {"num_cancellations": 1 / 3, "urgency": 1 / 3, "entrance_date": 1 / 3},
-            "surgeon_patient": {"complexity": 0.5, "skill": 0.5}}
+            "surgery_order": {"num_cancellations": 1, "complexity": 1, "urgency": 1, "age": 1},
+            "surgery_date": {"num_cancellations": 1, "urgency": 1, "entrance_date": 1},
+            "surgeon_patient": {"complexity": 1, "skill": 1}}
         self.max_attributes = self._init_max_attributes(DB)
+        self.min_attributes = self._init_min_attributes(DB)
+
+        #Reinforcement Learning Agent features
+        self.reward= None
+        self.max_reward = 0
+        self.curr_state = [1,1,1]
+        self.visited_states=[[1,1,1]]
+        self.available_actions_list =[]
+        self.best_state = None
+
+
+    def valid_action(self,action):
+        valid = True
+        if action in self.visited_states:
+            valid= False
+        for i in action:
+            if i<=0 or i>=11:
+                valid= False
+        return valid
+
+    def available_actions(self,curr_state):
+        optional_action = curr_state.copy()
+        available_actions=[]
+        for i in range(len(curr_state)):
+            optional_action[i] += 1
+            if self.valid_action(optional_action):
+                available_actions.append(optional_action.copy())
+            optional_action[i] -= 2
+            if self.valid_action(optional_action):
+                available_actions.append(optional_action.copy())
+            optional_action = curr_state.copy()
+        self.available_actions_list = available_actions
+        return available_actions
+
+    def choice_random_action(self):
+        random_action=[]
+        while True:
+            cancellations = random.randint(1,10)
+            urgency = random.randint(1,10)
+            entrance_date = random.randint(1,10)
+            random_action =[cancellations,urgency,entrance_date]
+            if self.valid_action(random_action):
+                self.curr_state = random_action
+                return
+
+    def update_action(self,action):
+        self.parameter_w['surgery_date']['num_cancellations'] = action[0]
+        self.parameter_w['surgery_date']['urgency'] = action[1]
+        self.parameter_w['surgery_date']['entrance_date'] = action[2]
+        self.curr_state = action
+        self.visited_states.append(action)
+        if len(self.available_actions_list)>0:
+            self.available_actions_list.remove(action)
+        print(self.parameter_w['surgery_date'])
+
+    def update_best_state(self,action):
+        self.parameter_w['surgery_date']['num_cancellations'] = action[0]
+        self.parameter_w['surgery_date']['urgency'] = action[1]
+        self.parameter_w['surgery_date']['entrance_date'] = action[2]
+        self.curr_state = action
+        print(self.parameter_w['surgery_date'])
 
     '''def init_max_slots(self):
         """
@@ -167,6 +236,37 @@ class Ward(object):
             return max_attributes
         else:
             return {}
+    def _init_min_attributes(self, DB):
+        """
+        creates dictionary of the current min parameters concerning current RTG - for parameter normalization in cost
+        functions
+        :param DB: boolean - True if read from DB False if read from csv
+        :return: dictionary - key parameter name - value its max or min value
+        """
+
+        if len(self.RTG) > 0:
+            min_attributes = {
+                "cancellations": min(self.RTG, key=self._by_cancellations_num).num_cancellations,
+                # the max cancellations in current RTG
+                "complexity": min(self.RTG, key=self._by_importance).complexity,
+                # the max complexity in current RTG
+                "duration": min(self.RTG, key=self._by_duration).duration,
+                # the max duration in current RTG
+                "min_birth_d": min(self.RTG, key=self._by_birth_d),
+                # surgery request with the youngest patient
+                "max_birth_d": max(self.RTG, key=self._by_birth_d),
+                #  surgery request with the eldest patient
+                "urgency": min(self.RTG, key=self._by_urgency).urgency,
+                # the max urgency in current RTG
+                "entrance_d": max(self.RTG, key=self._by_entrance_d),
+                # surgery request with earliest entrance date to ward
+                "entrance_d_cut": min(self.RTG, key=self._by_entrance_d_cut).entrance_date_cut,
+                # max entrance date cut in current RTG - the edc of the surgery request with earliest entrance date
+                "skill": self.get_min_skills(DB)}  # dictionary {key - surgery type id : value - max skill grade}
+
+            return min_attributes
+        else:
+            return {}
 
     @staticmethod
     def _by_entrance_d_cut(sr):
@@ -201,6 +301,10 @@ class Ward(object):
     def _by_entrance_d(sr):
         return sr.entrance_date
 
+    @staticmethod
+    def _by_schedule_d(sr):
+        return sr.schedule_date
+
     def get_max_skills(self, DB):
         """
         defines the max skill i.e. surgeon grade for each kind of surgery type
@@ -213,6 +317,19 @@ class Ward(object):
                 st_id = st.st_id
                 max_skills[st_id] = self.get_max_skill_by_st_id(st_id, DB)
         return max_skills
+
+    def get_min_skills(self, DB):
+        """
+        defines the max skill i.e. surgeon grade for each kind of surgery type
+        :param DB: boolean - True if read from DB False if read from csv
+        :return: dictionary : {key - st.id : value - max grade}
+        """
+        min_skills = {}
+        for u in self.units:
+            for st in u.surgery_types:
+                st_id = st.st_id
+                min_skills[st_id] = self.get_min_skill_by_st_id(st_id, DB)
+        return min_skills
 
     def get_max_skill_by_st_id(self, st_id, DB):
         """
@@ -235,6 +352,26 @@ class Ward(object):
             max_skill = 0
         return int(max_skill)
 
+    def get_min_skill_by_st_id(self, st_id, DB):
+        """
+        gets from DB all skills i.e. grades of certain surgery type 
+        :param DB: boolean - True if read from DB False if read from csv
+        :param st_id: surgery type id
+        :return: max grade of skill in the ward for this surgery type
+        """""
+        if DB:
+            url = "https://www.api.orm-bgu-soroka.com/skills_seniors/get_by_surgery_type_id"
+            params = {'surgery_type_id': st_id}
+            r = requests.post(url=url, json=params)
+            skills = r.json()
+        else:
+            df = pd.read_csv(path + r'\skill_seniors.csv')
+            skills = df.loc[lambda x: x['surgery_type_id'] == st_id].to_dict('records')
+        if len(skills) > 0:  # only because DB is not finished delete afterwards
+            max_skill = min(skills, key=self.by_skill)['skill']
+        else:
+            min_skill = 0
+        return int(max_skill)
     @staticmethod
     def by_skill(surgeon_skill):
         """

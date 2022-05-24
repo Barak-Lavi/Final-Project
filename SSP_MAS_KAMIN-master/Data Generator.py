@@ -6,8 +6,9 @@ import string
 import math
 import numpy as np
 import requests
+from scipy.stats import truncnorm
 
-path = r'C:\Users\User\Desktop\final project\ex2'
+path = r'C:\Users\User\Desktop\Final-Project\Final-Project\ex4'
 
 # if i want to write to xlsx and update the same file on different sheets
 '''from openpyxl import load_workbook
@@ -19,6 +20,9 @@ writer.close()
 '''
 day_duration = 420
 
+def get_truncated_normal(mean=0, sd=1, low=0, upp=10):
+    return truncnorm(
+        (low - mean) / sd, (upp - mean) / sd, loc=mean, scale=sd)
 
 def random_date(start, end):
     """
@@ -308,7 +312,9 @@ def rooms_allocations_generator(r_dict, w_id):
 def single_record_st(st, w, u):
     name = ''.join(random.choice(string.ascii_lowercase) for i in range(8))  # random string
     # urgency = random.randint(1, 6)
-    urgency = random.choices([1, 2, 3, 4, 5, 6], weights=[10, 20, 30, 30, 20, 10], k=1)[0]
+    # urgency = random.choices([1, 2, 3, 4, 5, 6], weights=[10, 20, 30, 30, 20, 10], k=1)[0]
+    urgency_dist = get_truncated_normal(mean=3.5, sd=1, low=1, upp=6)
+    urgency = urgency_dist.rvs()
     # complexity = random.randint(1, 6)
     complexity = random.choices([1, 2, 3, 4, 5, 6], weights=[10, 20, 30, 30, 20, 10], k=1)[0]
     # durations only multiple of 30
@@ -557,13 +563,18 @@ def random_single_record_sr(r_id, p_id, st_d_dict, a_date, a_days, ss_st_dict, s
     patient_id = random.choice(p_id)
     surgery_type = random.choice(list(st_d_dict.keys()))
     # urgency = random.randint(1, 6)
-    urgency = random.choices([1, 2, 3, 4, 5, 6], weights=[10, 20, 30, 30, 20, 10], k=1)[0]
+    # urgency = random.choices([1, 2, 3, 4, 5, 6], weights=[10, 20, 30, 30, 20, 10], k=1)[0]
+    urgency_dist = get_truncated_normal(mean=3.5, sd=1, low=1, upp=6)
+    urgency = urgency_dist.rvs()
     # complexity = random.randint(1, 6)
     complexity = random.choices([1, 2, 3, 4, 5, 6], weights=[10, 20, 30, 30, 20, 10], k=1)[0]
     duration = st_d_dict[surgery_type]
     status = 1.1
     #TODO change cancellation to (0,10)
-    cancellations = random.randint(1, 10)
+    # cancellations = random.randint(1, 10)
+    cancellations_dist = get_truncated_normal(mean=5, sd=2, low=0, upp=10)
+    cancellations = round(cancellations_dist.rvs())
+
     entrance_date = random_date(a_date - timedelta(weeks=52), a_date + timedelta(days=a_days))
     specific_senior = ''
     if surgery_type in ss_st_dict.values():

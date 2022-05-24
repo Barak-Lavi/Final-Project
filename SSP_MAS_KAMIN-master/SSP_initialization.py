@@ -1,5 +1,8 @@
+import random
+
 from Hospital import Hospital
 from Chief_Agent import Ward_Agent
+from Ward import Ward
 from Nurse_Agent import Nurse_Agent
 from Anesthetist_Agent import Anes_Agent
 from Equipment_Tracking_Agent import Equipment_Agent
@@ -17,12 +20,14 @@ from matplotlib.font_manager import FontProperties
 import os
 import pickle
 import requests
+import sys
 
 
 class Problem(object):
     def __init__(self, num_wards, schedule_date):
         self.general_post_office = []
         self.schedule_date = schedule_date
+        self.schedule_date_date = datetime.strptime(schedule_date, '%Y-%m-%d').date()
         self.agents = self.init_agents(num_wards)
         self.agents_mail_box = self.init_agents_mail_boxes()
         self.max_counter = 1000  # 50_000
@@ -173,8 +178,17 @@ class Problem(object):
                     max_global_schedule['ward_agents'][wa.a_id] = deepcopy(wa.v_dict)
                 max_global_schedule['anes'] = deepcopy(self.agents['extra_agents'][0].v_dict)
             global_costs[max_counter - 1] = global_cost
-            print('global cost in step ' + str(i) + ':' + str(global_cost) + 'max_counter:' + str(max_counter))
-        return global_costs, global_schedules, i, max_global_schedule
+            # print('global cost in step ' + str(i) + ':' + str(global_cost) + 'max_counter:' + str(max_counter))
+        ############################ RL application #################################
+
+        # divid to two groups of sr. one of the schedualed and the other of those that could and didnt, good sr
+
+        mean_stats_per_ward, max_min_stats_by_ward_schedual = self.schedule_analayse_RL()
+        ############### reward function calculation for every ward ! #############
+        reward_by_ward, global_norm_reward = self.reward_function_calc(mean_stats_per_ward,
+                                                                       max_min_stats_by_ward_schedual)
+
+        return global_costs, global_schedules, i, max_global_schedule, max_global_cost, reward_by_ward, global_norm_reward
 
     def DSA(self, single_change, num_iter, change_func=None, random_selection=True, stable_schedule_flag=True,
             no_good_flag=True):
@@ -189,6 +203,7 @@ class Problem(object):
         global_costs = {}
         max_counter = 0
         num_changes = []  # list of dictionaries index of dict is the iteration
+
         for a in list(itertools.chain.from_iterable(self.agents.values())):
             # todo addition for not full allocation
             if isinstance(a, Ward_Agent) and (
@@ -226,11 +241,19 @@ class Problem(object):
                 for wa in self.agents['ward_agents']:
                     max_global_schedule['ward_agents'][wa.a_id] = deepcopy(wa.v_dict)
                 max_global_schedule['anes'] = deepcopy(self.agents['extra_agents'][0].v_dict)
-            print('global cost in step ' + str(i) + ':' + str(global_cost) + 'max_counter:' + str(max_counter))
+            # print('global cost in step ' + str(i) + ':' + str(global_cost) + 'max_counter:' + str(max_counter))
             global_costs[max_counter - 1] = global_cost
         # mean_num_changes = sum(num_changes) / len(num_changes)  # mean of changes in iteration
+        ############################ RL application #################################
 
-        return global_costs, global_schedules, max_global_schedule #, num_changes
+        # divid to two groups of sr. one of the schedualed and the other of those that could and didnt, good sr
+
+        mean_stats_per_ward, max_min_stats_by_ward_schedual = self.schedule_analayse_RL()
+        ############### reward function calculation for every ward ! #############
+        reward_by_ward, global_norm_reward = self.reward_function_calc(mean_stats_per_ward,
+                                                                       max_min_stats_by_ward_schedual)
+
+        return global_costs, global_schedules, max_global_schedule, max_global_cost, reward_by_ward, global_norm_reward  # , num_changes
 
     def sum_global_costs(self, global_schedules):
         gc = 0
@@ -324,6 +347,107 @@ class Problem(object):
                 global_costs_by_counter[counter] += a.utility_by_counter[counter]
         return global_costs_by_counter
 
+    def schedule_analayse_RL(self):
+        """
+        after DSA return its best scheduale, the function divide it to two groups from the surgeries requests.
+        for each ward the function takes surgeries that was ready to go (rtg) and schedule to one group.
+        and rtg surgeries that didnt schedule but was able to (without hard constraints)
+        :return: max_min_stats_by_ward_schedual {} - min max features value from all available rtg surgeries without hard constraints
+        mean_stats_per_ward {} - mean features value only from the schedule surgeries
+        """
+
+        mean_stats_per_ward = {}
+        max_min_stats_by_ward_schedual = {}
+        for wr in self.agents['ward_agents']:
+            max_c, max_u, max_waiting_days = 0, 0, 0
+            min_c, min_u, min_waiting_days = 10, 10, 366
+            good_sr_rtg = []
+            for rtg in wr.ward.RTG:
+                if rtg not in wr.no_good_sr:
+                    good_sr_rtg.append(rtg)
+                    try:
+                        if max_c < rtg.num_cancellations:
+                            max_c = rtg.num_cancellations
+                        if min_c > rtg.num_cancellations:
+                            min_c = rtg.num_cancellations
+                    except:
+                        continue
+                    try:
+                        if max_u < rtg.urgency:
+                            max_u = rtg.urgency
+                        if min_u > rtg.urgency:
+                            min_u = rtg.urgency
+                    except:
+                        continue
+                    try:
+                        waiting_days = rtg.calc_waiting_days(self.schedule_date)
+                        if max_waiting_days < waiting_days:
+                            max_waiting_days = waiting_days
+                        if min_waiting_days > waiting_days:
+                            min_waiting_days = waiting_days
+                    except:
+                        continue
+            max_min_stats_by_ward_schedual[wr.ward] = {'max_c': max_c, 'min_c': min_c, 'max_u': max_u, 'min_u': min_u,
+                                                       'max_waiting_days': max_waiting_days,
+                                                       'min_waiting_days': min_waiting_days}
+
+            ###
+            schedule_sr_today = []
+            mean_c, mean_u, mean_waiting_days = 0, 0, 0
+            for sr in wr.v_dict[wr.ward].values():
+                for room in sr.values():
+                    for single_sched in room:
+                        schedule_sr_today.append(single_sched[0].value)
+                        try:
+                            mean_c += single_sched[0].value.num_cancellations
+                        except:
+                            continue
+                        try:
+                            mean_u += single_sched[0].value.urgency
+                        except:
+                            continue
+                        try:
+                            mean_waiting_days += single_sched[0].value.calc_waiting_days(self.schedule_date)
+                        except:
+                            continue
+
+            mean_c = mean_c / len(schedule_sr_today)
+            mean_u = mean_u / len(schedule_sr_today)
+            mean_waiting_days = mean_waiting_days / len(schedule_sr_today)
+            mean_stats_per_ward[wr.ward] = {'mean_c': mean_c, 'mean_u': mean_u, 'mean_waiting_days': mean_waiting_days}
+
+        return mean_stats_per_ward, max_min_stats_by_ward_schedual
+
+    def reward_function_calc(self, mean_stats_per_ward, max_min_stats_by_ward_schedual):
+        """
+        Reward function calculation for schadule of a single ward.
+        calc with Composite Desirability function- for each feature, the mean value of schedule surgeries
+        minus the min value of all rtg surgeries divide by max minus min of all rtg surgeries.
+        :return: reward_by_ward {} - reward value for each ward in the problem
+        """
+        reward_by_ward = {}
+        reward = 0
+        for ward in mean_stats_per_ward:
+            wr_reward = (((mean_stats_per_ward[ward]['mean_c'] - max_min_stats_by_ward_schedual[ward]['min_c']) /
+                          (max_min_stats_by_ward_schedual[ward]['max_c'] - max_min_stats_by_ward_schedual[ward][
+                              'min_c'] + sys.float_info.epsilon)) *
+                         ((mean_stats_per_ward[ward]['mean_u'] - max_min_stats_by_ward_schedual[ward]['min_c']) /
+                          (max_min_stats_by_ward_schedual[ward]['max_u'] - max_min_stats_by_ward_schedual[ward][
+                              'min_u'] + sys.float_info.epsilon)) *
+                         ((mean_stats_per_ward[ward]['mean_waiting_days'] - max_min_stats_by_ward_schedual[ward][
+                             'min_waiting_days']) /
+                          (max_min_stats_by_ward_schedual[ward]['max_waiting_days'] -
+                           max_min_stats_by_ward_schedual[ward][
+                               'min_waiting_days'] + sys.float_info.epsilon))) ** (1 / 3)
+            reward_by_ward[ward] = [wr_reward]
+            reward += wr_reward
+            ward.reward = wr_reward
+        ############### norm rewad for global value #############
+        global_norm_reward = reward / len(reward_by_ward.keys())
+
+        return reward_by_ward, global_norm_reward
+
+
 def NCLO_graph_DSA_SC_gc(DSA_SC_gc):
     DSA_SC_gc1 = standarize_gc(DSA_SC_gc.values())
     counter = len(DSA_SC_gc)
@@ -332,6 +456,7 @@ def NCLO_graph_DSA_SC_gc(DSA_SC_gc):
     plt.xlabel('non concurrent logical operation')
     plt.ylabel('utility')
     plt.show()
+
 
 def NCLO_graph(DSA_SC_gc, DSA_SC_E_gc, DSA_gc, DSA_SS_gc, NG_gc, NG_ss_gc):
     DSA_SC_gc1 = standarize_gc(DSA_SC_gc.values())
@@ -470,8 +595,9 @@ def NCLO_iter_graph_by_dict(nclo_gc_dict, color_dict, line_dict):
     fontP = FontProperties()
     fontP.set_size('xx-small')
     ax.legend(loc='center right', bbox_to_anchor=(1.31, 0.5), prop=fontP)
-    f.text(0.43, 0.01, 'NCLO', ha='center', va='center')
+    f.text(0.43, 0.01, 'iterations', ha='center', va='center')
     f.text(0.02, 0.5, 'Utility', ha='center', va='center', rotation='vertical')
+    plt.legend(loc='upper right')
     plt.show()
 
 
@@ -539,7 +665,7 @@ def NCLO_iter_graph(DSA_SC_gc, DSA_SC_E_gc, DSA_gc, DSA_SS_gc, NG_gc, NG_ss_gc, 
 
 
 def NCLO_average_graph(average_outputs, x_range, color_dict, line_dict, title):
-    #f, (ax1, ax2) = plt.subplots(1,2,sharey='all')
+    # f, (ax1, ax2) = plt.subplots(1,2,sharey='all')
     f, ax = plt.subplots()
     right_side = ax.spines["right"]
     right_side.set_visible(False)
@@ -598,6 +724,7 @@ def iter_graph(DSA_SC_gc, DSA_SC_E_gc, DSA_gc, DSA_SS_gc, NG_gc, NG_ss_gc, NG_SC
 
     plt.show()
 
+
 def iter_graph_Barak_test1(DSA_SC):
     DSA_SC = standarize_gc(DSA_SC.values())
     fig, (ax1), = plt.subplots(2, 4, sharey='all')
@@ -610,6 +737,7 @@ def iter_graph_Barak_test1(DSA_SC):
     ax1.set_title('DSA_SC')
 
     plt.show()
+
 
 def standarize_gc(gc):
     negative_costs = [c for c in gc if c < 0]
@@ -705,6 +833,7 @@ def t_test(read_path, no_good, write_path, algo1, algo2, by_max=False):
     t, p = ttest_ind(sample1, sample2)
     print(p)
 
+
 def read_pickle_files(read_path):
     files = os.listdir(read_path)
     outputs = []
@@ -716,6 +845,7 @@ def read_pickle_files(read_path):
         outputs.append(p)
         infile.close()
     return outputs
+
 
 def plot_num_changes(read_path):
     outputs = read_pickle_files(read_path)
@@ -762,43 +892,196 @@ def create_graph_num_changes(iteration_mean_outputs, problem):
     ax.set_title(problem + ' - SA Number Of Changes')
     plt.show()
 
-def yuval_t_test(read_path, algo1, algo2):
-    df = pd.read_csv(read_path)
-    print('ok')
+def reinforcement_iteration_action(reward_by_ward):
+    for ward_RL in reward_by_ward:
+        if (ward_RL.reward >= ward_RL.max_reward):
+            ward_RL.best_state = ward_RL.curr_state
+            ward_RL.max_reward = ward_RL.reward
+            # good action will continue to next available actions
+            ward_RL.available_actions(ward_RL.curr_state)
+            if len(ward_RL.available_actions_list) == 0:
+                ward_RL.choice_random_action()
+                ward_RL.update_action(ward_RL.curr_state)
+            else:
+                action = random.choice(ward_RL.available_actions_list)
+                ward_RL.update_action(action)
+        else:
+            # bad action, take another action from available actions
+            if len(ward_RL.available_actions_list) > 0:
+                action = random.choice(ward_RL.available_actions_list)
+                ward_RL.update_action(action)
+            else:
+                ward_RL.choice_random_action()
+                ward_RL.update_action(ward_RL.curr_state)
 
-# path = r'C:\Users\User\Desktop\thesis\system modeling\experiments\output\July Experiments\num changes\by agent\ss100'
-# write_path = r'C:\Users\User\Desktop\thesis\system modeling\experiments\output\July Experiments\no_schedule_date\stat_eval\AAAI\by_last_iter\5_room.csv'
-'''no_good = ['e11', 'e14', 'e15', 'e2', 'e28', 'e4', 'e38', 'e48']
-# statistical_evaluation(path, no_good, write_path, by_max=False)
-# t_test(path, no_good, write_path, 'QRDSA_sc_sf', 'Dsa_sc_e_sf', by_max=True)
-plot_num_changes(path)'''
+def DSA_RL_train(rl_iter):
+    global_cost_iter = {}
+    global_reward_iter = {}
+    reward_by_ward_iter = {}
+    DSA_best_states_per_ward ={}
+    for iter in range(0, rl_iter):
+        print('DSA_RL iter ' + str(iter))
 
-# yuvl_path = ""
+        dsa_sc_sat_iter_gc, dsa_sc_sat_iter_gs, dsa_sc_sat_mgs, max_global_cost, reward_by_ward, global_norm_reward = p.DSA(
+            single_change=True, num_iter=5000,
+            change_func='single_variable_change',
+            random_selection=True, stable_schedule_flag=True,
+            no_good_flag=True)
+
+        global_cost_iter[iter] = max_global_cost
+        global_reward_iter[iter] = global_norm_reward
+        reward_by_ward_iter[iter] = reward_by_ward
+        # reinforcement ward agent action
+        reinforcement_iteration_action(reward_by_ward)
+        if iter == 0:
+            DSA_before_RL = dsa_sc_sat_iter_gc
+
+        p.clear_problem()
+
+    for ward in reward_by_ward:
+        DSA_best_states_per_ward[ward] = [ward.best_state, ward.max_reward]
+
+
+    return DSA_best_states_per_ward ,DSA_before_RL, reward_by_ward_iter, global_reward_iter
+
+def QRDSA_RL_train(rl_iter,init_sol_value):
+    global_cost_iter = {}
+    global_reward_iter = {}
+    reward_by_ward_iter = {}
+    QRDSA_best_states_per_ward ={}
+    for iter in range(0, rl_iter):
+        print('QRDSA_RL iter ' + str(iter))
+
+        ssp_sc_sat_iter_gc, ssp_sc_sat_iter_gs, ssp_sc_sat_iter, ssp_sc_sat_mgs, max_global_cost, reward_by_ward, global_norm_reward = p.NG(
+            single_change=True, num_iter=5000,
+            change_func='single_variable_change',
+            stop_fs_flag=False,
+            init_sol_value= init_sol_value,
+            random_selection=True,
+            stable_schedule_flag=True,
+            no_good_flag=True)
+
+        global_cost_iter[iter] = max_global_cost
+        global_reward_iter[iter] = global_norm_reward
+        reward_by_ward_iter[iter] = reward_by_ward
+        # reinforcement ward agent action
+        reinforcement_iteration_action(reward_by_ward)
+
+        if iter == 0:
+            QRDSA_before_RL = ssp_sc_sat_iter_gc
+
+        p.clear_problem()
+
+    for ward in reward_by_ward:
+        QRDSA_best_states_per_ward[ward] = [ward.best_state, ward.max_reward]
+
+    return QRDSA_best_states_per_ward ,QRDSA_before_RL, reward_by_ward_iter, global_reward_iter
+
+### Reinforcement Learning plot ###
+def Reinforcement_Learning_iter_plot(reward_by_ward_iter, global_reward_iter,algo):
+    iterations = list(reward_by_ward_iter.keys())
+    wards_dict = reward_by_ward_iter[0]
+    for i in range(1, len(iterations)):
+        for j in wards_dict.keys():
+            wards_dict[j] += reward_by_ward_iter[i][j]
+    print('wards_dict')
+    print(wards_dict)
+
+    for i in wards_dict.keys():
+        y1 = wards_dict[i]
+        plt.plot(iterations, y1, label='ward ' + str(i.w_id))
+
+    plt.plot(iterations, list(global_reward_iter.values()), label='total schedule')
+    # naming the x axis
+    plt.xlabel('RL iterations')
+    # naming the y axis
+    plt.ylabel('Reward')
+    # giving a title to my graph
+    plt.title('Train RL Ward Agent ' + str(algo) + ' algorithm')
+
+    # show a legend on the plot
+    plt.legend(loc='upper right')
+
+    # function to show the plot
+    plt.show()
+
 
 # Full Experiment Script:
 p = Problem(num_wards=2, schedule_date='2021-11-07')
-# DSA_sc_sat -
-# there is an importance with ss and without -
-# because the enlargement of deltaE when with ss when change vs no enlargement without ss
-print('DSA_SC_SAT')
-dsa_sc_sat_iter_gc, dsa_sc_sat_iter_gs, dsa_sc_sat_mgs = p.DSA(single_change=True, num_iter=1000,
-                                                               change_func='single_variable_change',
-                                                               random_selection = True, stable_schedule_flag = True,
-                                                               no_good_flag = True)
-p.clear_problem()
 
-pickle_dict = {'DSA_sc_sat': dsa_sc_sat_iter_gc}
-outfile = open(r'C:\Users\User\Desktop\final project\output\ex2_output\demo2', 'wb')
+DSA_best_states_per_ward ,DSA_before_RL ,DSA_reward_by_ward_iter, DSA_global_reward_iter= DSA_RL_train(10)
+for wa in p.agents['ward_agents']:
+    wa.ward.curr_state = [1,1,1]
+    wa.ward.max_reward = 0
+    wa.ward.reward = None
+    wa.ward.visited_states = [[1, 1, 1]]
+    wa.ward.available_actions_list = []
+    wa.ward.best_state = None
+
+QRDSA_best_states_per_ward ,QRDSA_before_RL ,QRDSA_reward_by_ward_iter, QRDSA_global_reward_iter = QRDSA_RL_train(10,DSA_before_RL[0])
+
+### RL Train plot ###
+Reinforcement_Learning_iter_plot(DSA_reward_by_ward_iter, DSA_global_reward_iter,' DSA')
+Reinforcement_Learning_iter_plot(QRDSA_reward_by_ward_iter, QRDSA_global_reward_iter,' QRDSA')
+
+### schedule after RL training with best solution found
+
+for ward in DSA_best_states_per_ward.keys():
+    print('best state for ward ' + str(ward.w_id) + ' is: ' + str(DSA_best_states_per_ward[ward][0]) + ' with max reward: ' +
+          str(DSA_best_states_per_ward[ward][1]) )
+    ward.update_best_state(DSA_best_states_per_ward[ward][0])
+
+DSA_after_RL, dsa_sc_sat_iter_gs, dsa_sc_sat_mgs, max_global_cost, reward_by_ward, global_norm_reward = p.DSA(
+    single_change=True, num_iter=5000,
+    change_func='single_variable_change',
+    random_selection=True, stable_schedule_flag=True,
+    no_good_flag=True)
+
+for ward in QRDSA_best_states_per_ward.keys():
+    print('best state for ward ' + str(ward.w_id) + ' is: ' + str(QRDSA_best_states_per_ward[ward][0]) + ' with max reward: ' +
+          str(QRDSA_best_states_per_ward[ward][1]) )
+    ward.update_best_state(QRDSA_best_states_per_ward[ward][0])
+
+QRDSA_after_RL, ssp_sc_sat_iter_gs, ssp_sc_sat_iter, ssp_sc_sat_mgs, max_global_cost, reward_by_ward, global_norm_reward =\
+    p.NG(single_change=True, num_iter=5000, change_func='single_variable_change', stop_fs_flag=False,
+        init_sol_value=DSA_before_RL[0], random_selection=True, stable_schedule_flag=True, no_good_flag=True)
+
+pickle_dict = {'DSA_before_RL': DSA_before_RL, 'DSA_after_RL': DSA_after_RL,'QRDSA_befor_RL': QRDSA_before_RL, 'QRDSA_after_RL': QRDSA_after_RL}
+outfile = open(r'C:\Users\User\Desktop\Final-Project\Final-Project\output\ex3_output\demo1', 'wb')
 pickle.dump(pickle_dict, outfile)
 outfile.close()
-color_dict = {'DSA_sc_sat': 'navy'}
-line_dict = {'DSA_sc_sat': 'dashed'}
+color_dict = {'DSA_before_eRL': 'navy', 'DSA_after_RL': 'navy','QRDSA_before_RL': 'magenta', 'QRDSA_after_RL': 'magenta'}
+line_dict = {'DSA_before_RL': 'dashed', 'DSA_after_RL': 'solid','QRDSA_before_RL': 'dashed', 'QRDSA_after_RL': 'solid'}
+
+NCLO_iter_graph_by_dict(pickle_dict, color_dict, line_dict)
 
 
-path = r'C:\Users\User\Desktop\final project\output\ex2_output'
-# path = r'C:\Users\User\Desktop\thesis\system modeling\experiments\output\July Experiments\num changes\by agent'
+# p.clear_problem()
+
+### befor tyr qrdsa
+# pickle_dict = {'DSA_befor_RL': DSA_befor_RL, 'DSA_after_RL': DSA_after_RL}
+# outfile = open(r'C:\Users\User\Desktop\Final-Project\Final-Project\output\ex3_output\demo1', 'wb')
+# pickle.dump(pickle_dict, outfile)
+# outfile.close()
+# color_dict = {'DSA_befor_RL': 'navy', 'DSA_after_RL': 'red'}
+# line_dict = {'DSA_befor_RL': 'dashed', 'DSA_after_RL': 'dashed'}
+#
+# NCLO_iter_graph_by_dict(pickle_dict, color_dict, line_dict)
+#
+
+
+# pickle_dict = {'DSA_befor_RL': DSA_befor_RL}
+# outfile = open(r'C:\Users\User\Desktop\Final-Project\Final-Project\output\ex3_output\demo1', 'wb')
+# pickle.dump(pickle_dict, outfile)
+# outfile.close()
+# color_dict = {'DSA_befor_RL': 'navy'}
+# line_dict = {'DSA_befor_RL': 'dashed'}
+#
+path = r'C:\Users\User\Desktop\Final-Project\Final-Project\output\ex3_output'
+
 files = os.listdir(path)
 outputs = []
+
 ''''
 
 # DSA_sc_sat_ss
@@ -1191,7 +1474,7 @@ line_dict = {'DSA_SC_iter_gc': 'solid', 'DSA_SC_E_iter_gc': 'dashed',
 # # path = r'C:\Users\User\Desktop\thesis\system modeling\experiments\output\July Experiments\num changes\by agent'
 # files = os.listdir(path)
 # outputs = []
-#dsa_sc_sat_iter_gc, dsa_sc_sat_iter_gs, dsa_sc_sat_mgs
+# dsa_sc_sat_iter_gc, dsa_sc_sat_iter_gs, dsa_sc_sat_mgs
 # without sat & ng
 '''no_good = ['NG_iter_gc1', 'NG_iter_gc_ss1', 'NG_SC_iter_gc1', 'NG_SC_E_iter_gc1', 'DSA_sc_sat', 'DSA_sc_sat_sf',
            'DSA_sc_sat_sf_ng', 'Dsa_sc_e_sat', 'Dsa_sc_e_sat_sf', 'Dsa_sc_e_sat_sf_ng', 'QRDSA_sc_sat',
@@ -1291,7 +1574,7 @@ for algo in outputs_by_algo:
         interp_func = interp1d(np.fromiter(exp.keys(), dtype=float), np.fromiter(exp.values(), dtype=float))
         # outputs_by_algo_by_steps[algo]['X'].append(np.arange(0, 50_000, 100))
         outputs_by_algo_by_steps[algo]['X'].append(np.arange(0, 1000, 100))
-        #outputs_by_algo_by_steps[algo]['Y'].append(interp_func(np.arange(0, 50_000, 100)))
+        # outputs_by_algo_by_steps[algo]['Y'].append(interp_func(np.arange(0, 50_000, 100)))
         outputs_by_algo_by_steps[algo]['Y'].append(interp_func(np.arange(0, 1000, 100)))
         try:
             outputs_by_algo_by_steps[algo]['Y'].append(interp_func(np.arange(0, 50_000, 100)))
@@ -1314,5 +1597,5 @@ for algo in outputs_by_algo_by_steps:
 # NCLO_average_graph(average_outputs, np.arange(0, 50_000, 100), thesis_opt_color_dict, thesis_opt_line_dict, '')
 # NCLO_average_graph(average_outputs, np.arange(0, 50_000, 100), color_dict, line_dict, '')
 
-NCLO_iter_graph_by_dict(pickle_dict, color_dict, line_dict)
+
 # iter_graph_Barak_test1(outputs_by_algo_by_steps)
